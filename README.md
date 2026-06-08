@@ -43,3 +43,6 @@ The camera picker prefers `EXTERNAL`, then `BACK`, then `FRONT`. On some Rokid f
 ```sh
 adb shell am start -n com.example.rokidgesture/.MainActivity --es camera_id 0
 ```
+<img width="1228" height="1666" alt="image" src="https://github.com/user-attachments/assets/18ff554f-5697-414d-844f-27cce386fa93" />
+<img width="1260" height="1700" alt="image" src="https://github.com/user-attachments/assets/80770d4b-9d55-4612-b6cc-583db2d69013" />
+<img width="2366" height="1810" alt="image" src="https://github.com/user-attachments/assets/0beebb48-3944-4020-81a2-03268214a117" />
