@@ -38,10 +38,13 @@ final class CameraController {
     private static final int TARGET_WIDTH = 320;
     private static final int TARGET_HEIGHT = 240;
     private static final int RECONNECT_DELAY_MS = 1000;
+    // Rokid glasses display panel is physically portrait-mounted while Android reports
+    // a landscape activity orientation. MediaPipe must see the same portrait-up frame
+    // that the rotated UI overlay is drawn against.
+    private static final int PORTRAIT_PANEL_COMPENSATION_DEGREES = 270;
 
     private final Context context;
     private final FrameSink frameSink;
-    private YuvToRgbConverter converter = new YuvToRgbConverter(0);
 
     private HandlerThread cameraThread;
     private Handler cameraHandler;
@@ -52,6 +55,7 @@ final class CameraController {
     private String forcedCameraId;
     private boolean mirrored;
     private volatile boolean stopped;
+    private boolean opening;
     private int frameCount;
     private long lastNullLogMs;
     private int rotationDegrees;
@@ -86,6 +90,7 @@ final class CameraController {
     }
 
     private void closeCameraResources() {
+        opening = false;
         try {
             if (captureSession != null) {
                 captureSession.stopRepeating();
@@ -124,8 +129,9 @@ final class CameraController {
 
     @SuppressLint("MissingPermission")
     private void openCamera() {
-        Log.i(TAG, "openCamera() called, stopped=" + stopped);
+        Log.i(TAG, "openCamera() called, stopped=" + stopped + " opening=" + opening + " device=" + (cameraDevice != null));
         if (stopped) return;
+        if (opening || cameraDevice != null) return;
         if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             frameSink.onCameraError(new SecurityException("CAMERA permission is not granted."));
             return;
@@ -137,8 +143,6 @@ final class CameraController {
             String cameraId = selection.cameraId;
             frameSize = selection.size;
             mirrored = selection.facing == CameraCharacteristics.LENS_FACING_FRONT;
-            // Sensor frames may be rotated relative to a portrait display surface;
-            // rotate to upright so MediaPipe sees a normal-looking image.
             int displayRotation = ((android.view.WindowManager) context.getSystemService(Context.WINDOW_SERVICE))
                     .getDefaultDisplay().getRotation();
             int screenDegrees = 0;
@@ -148,15 +152,20 @@ final class CameraController {
                 case android.view.Surface.ROTATION_180: screenDegrees = 180; break;
                 case android.view.Surface.ROTATION_270: screenDegrees = 270; break;
             }
-            rotationDegrees = (selection.sensorOrientation - screenDegrees + 360) % 360;
-            Log.i(TAG, "Sensor: " + selection.sensorOrientation + "° Display: " + screenDegrees + "° → Rotate: " + rotationDegrees + "°");
+            rotationDegrees = (selection.sensorOrientation + PORTRAIT_PANEL_COMPENSATION_DEGREES + 360) % 360;
+            Log.i(TAG, "Sensor: " + selection.sensorOrientation + "° Display: " + screenDegrees
+                    + "° PortraitPanelCompensation: " + PORTRAIT_PANEL_COMPENSATION_DEGREES
+                    + "° → MediaPipe Rotate: " + rotationDegrees + "°");
             frameSink.onMirrorChanged(mirrored);
             frameSink.onCameraStatus(String.format(Locale.US, "camera=%s %dx%d", cameraId, frameSize.getWidth(), frameSize.getHeight()));
 
+            closeCameraResources();
             imageReader = ImageReader.newInstance(frameSize.getWidth(), frameSize.getHeight(), ImageFormat.YUV_420_888, 2);
             imageReader.setOnImageAvailableListener(this::onImageAvailable, cameraHandler);
+            opening = true;
             manager.openCamera(cameraId, cameraStateCallback, cameraHandler);
         } catch (Throwable error) {
+            opening = false;
             Log.e(TAG, "openCamera failed: " + error.getMessage());
             frameSink.onCameraStatus("openCamera failed: " + error.getMessage());
             Handler handler = cameraHandler;
@@ -169,6 +178,7 @@ final class CameraController {
     private final CameraDevice.StateCallback cameraStateCallback = new CameraDevice.StateCallback() {
         @Override
         public void onOpened(CameraDevice camera) {
+            opening = false;
             Log.i(TAG, "CameraDevice onOpened");
             cameraDevice = camera;
             createCaptureSession();
@@ -176,6 +186,7 @@ final class CameraController {
 
         @Override
         public void onDisconnected(CameraDevice camera) {
+            opening = false;
             Log.w(TAG, "Camera disconnected, retrying in " + RECONNECT_DELAY_MS + "ms...");
             camera.close();
             cameraDevice = null;
@@ -193,6 +204,7 @@ final class CameraController {
 
         @Override
         public void onError(CameraDevice camera, int error) {
+            opening = false;
             Log.e(TAG, "CameraDevice error: " + error);
             camera.close();
             cameraDevice = null;

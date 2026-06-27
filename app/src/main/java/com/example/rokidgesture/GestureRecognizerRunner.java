@@ -1,14 +1,16 @@
 package com.example.rokidgesture;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.media.Image;
 import android.util.Log;
 
+import com.google.mediapipe.framework.image.BitmapImageBuilder;
 import com.google.mediapipe.framework.image.MPImage;
-import com.google.mediapipe.framework.image.MediaImageBuilder;
 import com.google.mediapipe.tasks.components.processors.ClassifierOptions;
 import com.google.mediapipe.tasks.core.BaseOptions;
 import com.google.mediapipe.tasks.core.Delegate;
+import com.google.mediapipe.tasks.vision.core.ImageProcessingOptions;
 import com.google.mediapipe.tasks.vision.core.RunningMode;
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizer;
 import com.google.mediapipe.tasks.vision.gesturerecognizer.GestureRecognizerResult;
@@ -33,7 +35,11 @@ final class GestureRecognizerRunner implements AutoCloseable {
     private volatile Image pendingImageFrame;
     private volatile MPImage pendingImage;
     private volatile boolean closed;
+    private YuvToRgbConverter yuvConverter;
+    private int yuvConverterRotation = -1;
     private long lastTimestampMs = -1L;
+    private long recognizeCount;
+    private long resultCount;
 
     GestureRecognizerRunner(Context context, Listener listener) {
         this.listener = listener;
@@ -52,6 +58,7 @@ final class GestureRecognizerRunner implements AutoCloseable {
     }
 
     private GestureRecognizer build(Context context, Delegate delegate) {
+        Log.i(TAG, "Creating gesture recognizer with " + delegate + " delegate, model=" + MODEL_ASSET);
         BaseOptions baseOptions = BaseOptions.builder()
                 .setModelAssetPath(MODEL_ASSET)
                 .setDelegate(delegate)
@@ -96,12 +103,27 @@ final class GestureRecognizerRunner implements AutoCloseable {
             }
             lastTimestampMs = timestampMs;
 
-            pendingWidth = ((rotationDegrees == 90 || rotationDegrees == 270) ? image.getHeight() : image.getWidth());
-            pendingHeight = ((rotationDegrees == 90 || rotationDegrees == 270) ? image.getWidth() : image.getHeight());
+            int normalizedRotation = ((rotationDegrees % 360) + 360) % 360;
+            if (yuvConverter == null || yuvConverterRotation != normalizedRotation) {
+                yuvConverter = new YuvToRgbConverter(normalizedRotation);
+                yuvConverterRotation = normalizedRotation;
+            }
+            Bitmap bitmap = yuvConverter.toBitmap(image).copy(Bitmap.Config.ARGB_8888, false);
+            pendingWidth = bitmap.getWidth();
+            pendingHeight = bitmap.getHeight();
             pendingImageFrame = image;
-            MPImage mpImage = new MediaImageBuilder(image).build();
+            MPImage mpImage = new BitmapImageBuilder(bitmap).build();
+            ImageProcessingOptions imageOptions = ImageProcessingOptions.builder()
+                    .setRotationDegrees(0)
+                    .build();
             pendingImage = mpImage;
-            recognizer.recognizeAsync(mpImage, timestampMs);
+            recognizeCount++;
+            if (recognizeCount == 1 || recognizeCount % 30 == 0) {
+                Log.i(TAG, "recognizeAsync #" + recognizeCount + " image=" + image.getWidth() + "x" + image.getHeight()
+                        + " rotation=" + normalizedRotation + " bitmap=" + pendingWidth + "x" + pendingHeight
+                        + " timestamp=" + timestampMs);
+            }
+            recognizer.recognizeAsync(mpImage, imageOptions, timestampMs);
             return true;
         } catch (Throwable error) {
             releasePending();
@@ -114,6 +136,10 @@ final class GestureRecognizerRunner implements AutoCloseable {
     private void handleResult(GestureRecognizerResult result, MPImage ignoredInput) {
         try {
             if (!closed) {
+                resultCount++;
+                if (resultCount == 1 || resultCount % 30 == 0) {
+                    Log.i(TAG, "result #" + resultCount + " hands=" + result.landmarks().size());
+                }
                 listener.onGestureResult(HandsResult.fromMediaPipe(result, pendingWidth, pendingHeight));
             }
         } catch (Throwable error) {

@@ -27,7 +27,10 @@ public final class MainActivity extends Activity
 
     private GestureOverlayView gestureOverlay;
     private CameraController cameraController;
-    private GestureRecognizerRunner gestureRunner;
+    private volatile GestureRecognizerRunner gestureRunner;
+    private volatile boolean active;
+    private volatile boolean cameraStarted;
+    private Thread recognizerInitThread;
     private LandmarkRecorder recorder;
     private LandmarkSmoother smoother;
     private FpsMeter fpsMeter;
@@ -72,6 +75,7 @@ public final class MainActivity extends Activity
             }
         });
 
+        active = true;
         if (hasCameraPermission()) {
             initCameraAndRecognizer();
         } else {
@@ -82,14 +86,25 @@ public final class MainActivity extends Activity
     @Override
     protected void onResume() {
         super.onResume();
+        active = true;
         if (gpuMonitor != null) gpuMonitor.start();
-        if (hasCameraPermission() && gestureRunner == null) {
+        if (hasCameraPermission()) {
             initCameraAndRecognizer();
         }
     }
 
     @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus && active && hasCameraPermission()) {
+            startCameraIfNeeded();
+        }
+    }
+
+    @Override
     protected void onPause() {
+        active = false;
+        cameraStarted = false;
         stopRecording();
         if (cameraController != null) {
             cameraController.stop();
@@ -133,7 +148,7 @@ public final class MainActivity extends Activity
         }
         totalFrames++;
         if (totalFrames == 1 || totalFrames % 30 == 0) {
-            Log.i(TAG, "Total frames: " + totalFrames);
+            Log.i(TAG, "Total frames: " + totalFrames + " image=" + image.getWidth() + "x" + image.getHeight() + " rotation=" + rotationDegrees);
         }
         if (!runner.recognize(image, rotationDegrees, timestampMs)) {
             if (image != null) image.close();
@@ -241,22 +256,42 @@ public final class MainActivity extends Activity
         }
     }
 
-    private void initCameraAndRecognizer() {
-        if (gestureRunner == null) {
-            try {
-                gestureRunner = new GestureRecognizerRunner(this, this);
-            } catch (Throwable error) {
-                Log.e(TAG, "Failed to load gesture recognizer model", error);
-                Toast.makeText(this, "Model load failed: " + error.getMessage(), Toast.LENGTH_LONG).show();
+    private void startCameraIfNeeded() {
+        if (cameraStarted || cameraController == null) return;
+        String forcedCameraId = getIntent().getStringExtra(EXTRA_CAMERA_ID);
+        Log.i(TAG, "Scheduling camera start, active=" + active + " hasWindowFocus=" + hasWindowFocus());
+        gestureOverlay.postDelayed(() -> {
+            if (cameraStarted || cameraController == null) {
+                Log.i(TAG, "Camera start skipped, started=" + cameraStarted + " active=" + active);
                 return;
             }
-        }
+            cameraStarted = true;
+            Log.i(TAG, "Starting camera, hasWindowFocus=" + hasWindowFocus());
+            cameraController.start(forcedCameraId);
+        }, 300L);
+    }
 
+    private void initCameraAndRecognizer() {
         if (cameraController == null) {
             cameraController = new CameraController(this, this);
         }
+        startCameraIfNeeded();
 
-        String forcedCameraId = getIntent().getStringExtra(EXTRA_CAMERA_ID);
-        cameraController.start(forcedCameraId);
+        if (gestureRunner == null && recognizerInitThread == null) {
+            recognizerInitThread = new Thread(() -> {
+                try {
+                    Log.i(TAG, "Initializing gesture recognizer on background thread");
+                    GestureRecognizerRunner runner = new GestureRecognizerRunner(this, this);
+                    gestureRunner = runner;
+                    Log.i(TAG, "Gesture recognizer ready, active=" + active);
+                } catch (Throwable error) {
+                    Log.e(TAG, "Failed to load gesture recognizer model", error);
+                    runOnUiThread(() -> Toast.makeText(this, "Model load failed: " + error.getMessage(), Toast.LENGTH_LONG).show());
+                } finally {
+                    recognizerInitThread = null;
+                }
+            }, "GestureInit");
+            recognizerInitThread.start();
+        }
     }
 }
